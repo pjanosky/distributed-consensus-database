@@ -105,14 +105,15 @@ class Replica:
                 self.begin_election()
                 timeout = self.election_timeout - (now() - self.last_append_time)
 
-    def new_term(self, term=None):
+    def new_term(self, new_term=None):
         # increment term
-        if term is None:
+        if new_term is None:
             self.current_term += 1
         else:
-            if term >= self.current_term:
-                self.current_term = term
+            if new_term >= self.current_term:
+                self.current_term = new_term
             else:
+                log(f'current term: {self.current_term}, new term: {new_term}')
                 exit('invalid term value (terms increase monotonically)')
 
         # reinitialize other data
@@ -123,11 +124,12 @@ class Replica:
         self.new_term()
         self.last_append_time = now()
         self.state = State.CANDIDATE
+        self.voted_for = self.id
         self.votes = 1  # vote for yourself
         self.leader = 'FFFF'
 
         # send vote requests out to all hosts in cluster
-        latest_term = self.log[-1] if len(self.log) > 0 else -1
+        latest_term = self.log[-1].term if len(self.log) > 0 else -1
         for dst in self.others:
             self.send_msg(dst, 'request_vote', {'term': self.current_term,
                                                 'last_log_term': latest_term,
@@ -198,11 +200,11 @@ class Replica:
 
     def handle_request_vote(self, msg):
         # check if we are more up to date
-        if self.voted_for is None and not self.more_updated(msg):
+        if self.voted_for is None and self.current_term <= msg['term'] and not self.more_updated(msg):
             # other replica is more up to date, update term and send vote
-            self.new_term(term=msg['term'])
+            self.new_term(new_term=msg['term'])
             self.voted_for = msg['src']
-            log(f'voting for {msg["src"]}')
+            log(f'voting for {msg["src"]} (term: {self.current_term})')
             self.send_msg(msg['src'], 'request_vote_response', {'term': self.current_term})
 
     def handle_request_vote_response(self, msg):
@@ -238,10 +240,8 @@ class Replica:
     # returns True if this replica's log is more up to date than the log of another
     # replica described in a vote request message
     def more_updated(self, msg):
-        if self.current_term != msg['last_log_term']:
-            return self.current_term < msg['last_log_term']
-        else:
-            return len(self.log) - 1 < msg['last_log_index']
+        latest_term = self.log[-1].term if len(self.log) > 0 else -1
+        return (latest_term, len(self.log) - 1) > (msg['last_log_term'], msg['last_log_index'])
 
 
 # returns the current time since the epoch in ms
