@@ -1,0 +1,223 @@
+#!/usr/bin/env python3
+
+import argparse
+import json
+import select
+import socket
+import time
+import random
+from enum import Enum
+
+BROADCAST = "FFFF"
+SEED = 0
+ELECTION_TIMEOUT_RANGE = range(150, 300)
+HEARTBEAT_FREQUENCY = 100
+
+
+class State(Enum):
+    LEADER = 'leader'
+    CANDIDATE = 'candidate'
+    FOLLOWER = 'follower'
+
+
+class Command(Enum):
+    GET = 'get'
+    PUT = 'put'
+
+
+class Entry:
+    def __init__(self, term, command, key):
+        self.term = term
+        self.command = command
+        self.key = key
+
+
+class Replica:
+    def __init__(self, port, id, others):
+        self.port = port
+        self.id = id
+        self.others = others
+
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.socket.bind(('localhost', 0))
+
+        self.state = State.FOLLOWER
+        self.leader = 'FFFF'
+        self.log = []
+        self.term = -1
+        self.election_timeout = random.choice(ELECTION_TIMEOUT_RANGE)
+
+        self.last_append_time = now()
+        self.voted = False
+        self.votes = 1
+
+        self.new_term()
+
+        log('Replica %s starting up' % self.id)
+        hello = {'src': self.id, 'dst': BROADCAST, 'leader': BROADCAST, 'type': 'hello'}
+        self.send(hello)
+        log('Sent hello message: %s' % hello)
+
+    def send(self, msg):
+        # log(f'sending message: {json.dumps(msg)}')
+        self.socket.sendto(json.dumps(msg).encode('utf-8'), ('localhost', self.port))
+
+    def send_msg(self, dst, type, keys):
+        msg = {'src': self.id,
+               'dst': dst,
+               'leader': self.leader,
+               'type': type}
+        msg.update(keys)
+        self.send(msg)
+
+    def run(self):
+        timeout = max(0, self.election_timeout - (now() - self.last_append_time))
+
+        while True:
+            socks = select.select([self.socket], [], [], float(max(0, timeout)) / 1000)[0]
+            if len(socks) > 0:
+                # received message
+                data, addr = socks[0].recvfrom(65535)
+                msg = json.loads(data.decode('utf-8'))
+                self.handle_msg(msg)
+
+            # check if it's been a while since heartbeat was sent or heard
+            if self.state == State.LEADER:
+                # we are the leader, check if a heartbeat needs to be sent
+                if now() >= self.last_append_time + HEARTBEAT_FREQUENCY:
+                    # send heartbeats
+                    self.send_heartbeat()
+                timeout = HEARTBEAT_FREQUENCY - (now() - self.last_append_time)
+            elif now() >= self.last_append_time + self.election_timeout:
+                # we are not the leader, check if an election needs to be started
+                log('starting election')
+                self.begin_election()
+                timeout = self.election_timeout - (now() - self.last_append_time)
+
+    def new_term(self):
+        # increment term
+        self.term += 1
+
+        # set other data
+        self.voted = False
+        self.election_timeout = random.choice(ELECTION_TIMEOUT_RANGE)
+
+    def begin_election(self):
+        self.new_term()
+        self.last_append_time = now()
+        self.state = State.CANDIDATE
+        self.votes = 1  # vote for yourself
+
+        # send vote requests out to all hosts in cluster
+        latest_term = self.log[-1] if len(self.log) > 0 else -1
+        for dst in self.others:
+            self.send_msg(dst, 'request_vote', {'term': latest_term, 'index': len(self.log) - 1})
+
+    def send_heartbeat(self):
+        for dst in self.others:
+            self.send_append(dst)
+
+    def send_append(self, dst):
+        self.last_append_time = now()
+        self.send_msg(dst, 'append', {'term': self.term})
+
+    def handle_msg(self, msg):
+        ensure_valid_msg(msg)
+        handlers = {'get': self.handle_get,
+                    'put': self.handle_put,
+                    'request_vote': self.handle_request_vote,
+                    'request_vote_response': self.handle_request_vote_response,
+                    'append': self.handle_append,
+                    'append_response': self.handle_app_response}
+
+        if msg['type'] in handlers.keys():
+            handlers[msg['type']](msg)
+        else:
+            log(f'unknown message type: {type}')
+
+    def handle_get(self, msg):
+        if self.state == State.LEADER:
+            self.send_msg(msg['src'], 'fail', {'MID': msg['MID']})
+        else:
+            self.send_msg(msg['src'], 'redirect', {'MID': msg['MID']})
+
+    def handle_put(self, msg):
+        if self.state == State.LEADER:
+            self.send_msg(msg['src'], 'fail', {'MID': msg['MID']})
+        else:
+            self.send_msg(msg['src'], 'redirect', {'MID': msg['MID']})
+
+    def handle_request_vote(self, msg):
+        # check if we are more up to date
+        if not self.voted and not self.more_updated(msg):
+            # other replica is more up to date, send vote
+            self.voted = True
+            log(f'voting for {msg["src"]}')
+            response = {'src': self.id,
+                        'dst': msg["src"],
+                        'leader': self.leader,
+                        'type': 'request_vote_response'}
+            self.send(response)
+
+    def handle_request_vote_response(self, msg):
+        if self.state == State.CANDIDATE:
+            self.votes += 1
+            if self.votes >= (len(self.others) + 1) / 2 + 1:
+                self.state = State.LEADER
+                self.leader = self.id
+                log("I'm the leader now!!!")
+                self.send_heartbeat()
+
+    def handle_append(self, msg):
+        if msg['term'] >= self.term:
+            self.last_append_time = now()
+            self.state = State.FOLLOWER
+            self.leader = msg['src']
+
+        # TODO: actually add data to log
+
+    def handle_app_response(self, msg):
+        pass
+
+    # returns True if this replica's log is more up to date than the log of another
+    # replica described in a vote request message
+    def more_updated(self, msg):
+        if self.term != msg['term']:
+            return self.term < msg['term']
+        else:
+            return len(self.log) - 1 < msg['index']
+
+
+# returns the current time since the epoch in ms
+def now():
+    return int(time.time() * 1000)
+
+
+# print a message immediately to stdout
+def log(msg):
+    print(msg, flush=True)
+
+
+# ensure that a message has all the required keys
+# exits the program if a key is missing
+def ensure_valid_msg(msg):
+    params = ['src', 'dst', 'leader', 'type']
+    for p in params:
+        if p not in msg:
+            log(f'invalid message: missing {p} parameter')
+            exit()
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description='run a key-value store')
+    parser.add_argument('port', type=int, help='Port number to communicate')
+    parser.add_argument('id', type=str, help='ID of this replica')
+    parser.add_argument('others', metavar='others', type=str, nargs='+', help='IDs of other replicas')
+    return parser.parse_args()
+
+
+if __name__ == '__main__':
+    args = parse_args()
+    replica = Replica(args.port, args.id, args.others)
+    random.seed(SEED)
+    replica.run()
