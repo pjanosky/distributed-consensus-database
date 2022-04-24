@@ -11,7 +11,7 @@ from enum import Enum
 BROADCAST = "FFFF"
 SEED = 0
 ELECTION_TIMEOUT_RANGE = range(150, 300)
-HEARTBEAT_FREQUENCY = 135
+HEARTBEAT_FREQUENCY = 100
 
 
 class State(Enum):
@@ -130,6 +130,7 @@ class Replica:
 
         # send vote requests out to all hosts in cluster
         latest_term = self.log[-1].term if len(self.log) > 0 else -1
+        log('sending vote requests')
         for dst in self.others:
             self.send_msg(dst, 'request_vote', {'term': self.current_term,
                                                 'last_log_term': latest_term,
@@ -144,7 +145,8 @@ class Replica:
         self.send_msg(dst, 'append', {'term': self.current_term,
                                       'prev_log_index': prev_index,
                                       'prev_log_term': prev_term,
-                                      'entries': entries})
+                                      'entries': entries,
+                                      'leader_commit': self.commit_index})
 
     def commit(self, index):
         # ensure index is valid
@@ -174,7 +176,7 @@ class Replica:
 
     def handle_get(self, msg):
         if self.state == State.LEADER:
-            log(f'executing GET (key: {msg["key"]})')
+            # log(f'executing GET (key: {msg["key"]})')
             if msg['key'] in self.state_machine:
                 self.send_msg(msg['src'], 'ok', {'MID': msg['MID'],
                                                  'value': self.state_machine[msg['key']]})
@@ -182,21 +184,24 @@ class Replica:
                 self.send_msg(msg['src'], 'ok', {'MID': msg['MID'],
                                                  'value': ''})
         else:
-            log(f'redirecting GET to leader (key: {msg["key"]}')
+            # log(f'redirecting GET to leader (key: {msg["key"]}')
             self.send_msg(msg['src'], 'redirect', {'MID': msg['MID']})
         # TODO: might need to send fail here if there is no known leader
         #  (or maybe not depending on how this is graded)
 
     def handle_put(self, msg):
+        log(f'start put: {now()}')
         if self.state == State.LEADER:
-            log(f'executing PUT (key: {msg["key"]}, value: {msg["value"]})')
+            # log(f'executing PUT (key: {msg["key"]}, value: {msg["value"]})')
             self.log.append(Entry(self.current_term, msg['key'], msg['value']))
             self.commit(len(self.log) - 1)
             self.send_msg(msg['src'], 'ok', {'MID': msg['MID']})
             # TODO: replicate the put and make sure it was good before sending ok message
+            #        Note that new entries are send out in the next routine heartbeat message
         else:
-            log(f'redirecting PUT to leader (key: {msg["key"]}, value: {msg["value"]})')
+            # log(f'redirecting PUT to leader (key: {msg["key"]}, value: {msg["value"]})')
             self.send_msg(msg['src'], 'redirect', {'MID': msg['MID']})
+        log(f'end put: {now()}')
 
     def handle_request_vote(self, msg):
         # check if we are more up to date
@@ -224,7 +229,7 @@ class Replica:
 
     def handle_append(self, msg):
         if msg['term'] >= self.current_term:
-            # this is a current valid append RCP
+            # this is a currently valid append RCP
             self.last_append_time = now()
             self.state = State.FOLLOWER
             self.leader = msg['src']
@@ -232,6 +237,7 @@ class Replica:
 
             if len(msg['entries']) > 0:
                 # TODO: add data to log
+                # TODO: update commit index based on leaders commit index included in append msg
                 pass
 
     def handle_app_response(self, msg):
