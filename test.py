@@ -15,7 +15,7 @@ def measure_failure(file):
         elif 'executing GET' in line:
             i = line.find('mid: ')
             gets.append(line[i + 5:i + 5 + 16])
-        elif 'completing GET' in line:
+        elif 'completed GET' in line:
             i = line.find('mid: ')
             gets_resp.append(line[i + 5:i + 5 + 16])
 
@@ -40,24 +40,32 @@ def measure_failure(file):
 
 def measure_times(file):
     puts = {}
+    total = 0
+    redirects = []
 
     for line in file.readlines():
         if 'executing PUT' in line:
             i = line.find('mid: ')
             mid = line[i + 5:i + 5 + 16]
             time = float(line[1:8].strip())
-            puts[mid] = (time, None)
+            puts[mid] = (time, time)
+            total += 1
         elif 'completed PUT' in line:
             i = line.find('mid: ')
             mid = line[i + 5:i + 5 + 16]
             time = float(line[1:8].strip())
             puts[mid] = (puts[mid][0], time)
+        elif 'redirecting' in line:
+            i = line.find('mid: ')
+            mid = line[i + 5:i + 5 + 16]
+            redirects.append(mid)
 
     latencies = sorted(list(map(lambda t: t[1] - t[0], puts.values())))
-    print(f'{len(puts)} puts')
+    print(f'{len(puts)} puts (total: {total}, max: {latencies[-1]}, min: {latencies[0]})')
+    print(f'redirects: {redirects}')
     print(f'median latency: {latencies[int(len(latencies) / 2)]}')
 
 
 with open('output.txt', 'r') as f:
-    measure_failure(f)
+    measure_times(f)
 
