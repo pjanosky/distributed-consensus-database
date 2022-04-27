@@ -1,10 +1,44 @@
 
-with open('output.txt', 'r') as file:
-    # requests = []
-    # responses = []
-    # gets = []
-    # failed = []
+def measure_failure(file):
+    puts = []
+    puts_resp = []
+    gets = []
+    gets_resp = []
 
+    for line in file.readlines():
+        if 'executing PUT' in line:
+            i = line.find('mid: ')
+            puts.append(line[i + 5:i + 5 + 16])
+        elif 'completed PUT' in line:
+            i = line.find('mid: ')
+            puts_resp.append(line[i + 5:i + 5 + 16])
+        elif 'executing GET' in line:
+            i = line.find('mid: ')
+            gets.append(line[i + 5:i + 5 + 16])
+        elif 'completing GET' in line:
+            i = line.find('mid: ')
+            gets_resp.append(line[i + 5:i + 5 + 16])
+
+    print(f'GETs: {len(gets)}, requests, {len(gets_resp)} responses')
+    print(f'PUTs: {len(puts)} requests, {len(puts_resp)} responses')
+    print(f'unanswered GETs {set(gets).difference(set(gets_resp))}')
+    print(f'unanswered PUTs {set(puts).difference(set(puts_resp))}')
+
+    repeats = set()
+    for mid in gets_resp:
+        if len(list(filter(lambda m: mid == m, gets_resp))) > 1:
+            repeats.add(mid)
+    print(f'repeated GETs: {repeats}')
+
+
+    repeats = set()
+    for mid in puts_resp:
+        if len(list(filter(lambda m: mid == m, puts_resp))) > 1:
+            repeats.add(mid)
+    print(f'repeated PUTs: {repeats}')
+
+
+def measure_times(file):
     puts = {}
 
     for line in file.readlines():
@@ -18,27 +52,12 @@ with open('output.txt', 'r') as file:
             mid = line[i + 5:i + 5 + 16]
             time = float(line[1:8].strip())
             puts[mid] = (puts[mid][0], time)
-        # elif 'executing GET' in line:
-        #     i = line.find('mid: ')
-        #     gets.append(line[i + 5:i + 5 + 16])
-        # elif 'can\'t find value' in line:
-        #     i = line.find('mid: ')
-        #     failed.append(line[i + 5:i + 5 + 16])
-
-    # print(f'PUTS: {len(requests)} requests, {len(responses)} responses')
-    # print(f'GETS: {len(gets)}, requests, {len(failed)} failures')
-    # print(f'failed puts {set(requests).difference(set(responses))}')
-    # print(f'failed gets {failed}')
-    #
-    # for mid in responses:
-    #     if len(list(filter(lambda m: mid == m, responses))) > 1:
-    #         print(f'repeat PUT response: {mid}')
-    #
-    # for mid in gets:
-    #     if len(list(filter(lambda m: mid == m, gets))) > 1:
-    #         print(f'repeat GET response: {mid}')
 
     latencies = sorted(list(map(lambda t: t[1] - t[0], puts.values())))
     print(f'{len(puts)} puts')
     print(f'median latency: {latencies[int(len(latencies) / 2)]}')
+
+
+with open('output.txt', 'r') as f:
+    measure_failure(f)
 

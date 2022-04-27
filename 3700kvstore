@@ -21,11 +21,12 @@ class State(Enum):
 
 
 class Entry:
-    def __init__(self, term, key, value, src, mid):
+    def __init__(self, term, key, value, src, dst, mid):
         self.term = term
         self.key = key
         self.value = value
         self.src = src
+        self.dst = dst
         self.mid = mid
 
     def encode(self):
@@ -33,14 +34,29 @@ class Entry:
                 'key': self.key,
                 'value': self.value,
                 'src': self.src,
+                'dst': self.dst,
                 'mid': self.mid}
 
     @classmethod
     def decode(cls, dct):
-        return Entry(dct['term'], dct['key'], dct['value'], dct['src'], dct['mid'])
+        return Entry(dct['term'], dct['key'], dct['value'], dct['src'], dct['dst'], dct['mid'])
 
     def __str__(self):
         return f'key: {self.key}, value: {self.value} (term={self.term}, mid={self.mid})'
+
+
+class Get:
+    def __init__(self, src, key, mid):
+        self.src = src
+        self.key = key
+        self.mid = mid
+        self.time = now()
+
+    def __hash__(self):
+        return hash(self.mid)
+
+    def __eq__(self, other):
+        return self.mid == other.mid
 
 
 class Replica:
@@ -65,12 +81,15 @@ class Replica:
         self.voted_for = None
         self.votes = set()
         self.commit_index = -1
+        self.gets = set()
 
         # initialize leader data
         # map from id to the index of the highest log entry known to be on the server
         self.match_index = dict.fromkeys(self.others, -1)
         # map from id to next index the leader will send to that server
         self.next_index = dict.fromkeys(self.others, len(self.log))
+        # map from id to the last time we've heard from that server
+        self.last_heard = dict.fromkeys(self.others, 0)
 
         self.maj_thresh = int((len(self.others) + 1) / 2) + 1
         # dprint(f'majority threshold: {self.maj_thresh}')
@@ -135,7 +154,7 @@ class Replica:
                 exit('invalid term value (terms increase monotonically)')
 
     def begin_election(self):
-        # dprint('--------------------- starting election ---------------------')
+        dprint('--------------------- starting election ---------------------')
         self.new_term()
         self.last_append_time = now()
         self.state = State.CANDIDATE
@@ -151,7 +170,7 @@ class Replica:
                                                 'last_log_index': len(self.log) - 1})
 
     def send_heartbeat(self):
-        # dprint('sending heartbeat')
+        dprint('sending heartbeat')
         for dst in self.others:
             self.send_append(dst, None, None, [])
 
@@ -174,8 +193,8 @@ class Replica:
         for entry in self.log[self.commit_index + 1:index + 1]:
             # dprint(f'committing key {entry.key}, value {entry.value} to state machine (mid={entry.mid})')
             self.state_machine[entry.key] = entry.value
-            if self.state == State.LEADER:
-                # dprint(f'completed PUT (mid: {entry.mid}, time: {now()})')
+            if self.state == State.LEADER and entry.dst == self.id:
+                dprint(f'completed PUT (mid: {entry.mid}, time: {now()})')
                 self.send_msg(entry.src, 'ok', {'MID': entry.mid})
 
         # increment commit index
@@ -190,6 +209,10 @@ class Replica:
                     'append': self.handle_append,
                     'append_response': self.handle_append_response}
 
+        # record that we've heard from the sender
+        if msg['src'] in self.last_heard:
+            self.last_heard[msg['src']] = now()
+
         # call the appropriate handler
         if msg['type'] in handlers.keys():
             handlers[msg['type']](msg)
@@ -199,34 +222,38 @@ class Replica:
     def handle_get(self, msg):
         if self.state == State.LEADER:
             if msg['key'] in self.state_machine:
-
-                # dprint(f'executing GET (mid: {msg["MID"]}, key {msg["key"]})')
-                self.send_msg(msg['src'], 'ok', {'MID': msg['MID'],
-                                                 'value': self.state_machine[msg['key']]})
+                dprint(f'executing GET (mid: {msg["MID"]}, key {msg["key"]})')
+                for dst in self.others:
+                    self.send_append(dst, None, None, [])
+                self.gets.add(Get(msg['src'], msg['key'], msg['MID']))
             else:
                 print(f'can\'t find value for  GET (mid: {msg["MID"]}, key {msg["key"]})', flush=True)
-                print(f'commit index: {self.commit_index}, highest log index: {len(self.log) - 1}, len state machine {len(self.state_machine)}', flush=True)
-                # print('\n\t'.join(list(map(lambda k: f'key: {k}, value: {self.state_machine[k]}', self.state_machine))), flush=True)
+                print(
+                    f'commit index: {self.commit_index}, highest log index: {len(self.log) - 1}, len state machine '
+                    f'{len(self.state_machine)}',
+                    flush=True)
+                # print('\n\t'.join(list(map(lambda k: f'key: {k}, value: {self.state_machine[k]}',
+                # self.state_machine))), flush=True)
                 self.send_msg(msg['src'], 'ok', {'MID': msg['MID'],
                                                  'value': ''})
                 time.sleep(1)
                 exit('FAILED A GET')
         else:
-            # dprint(f'redirecting GET to leader (key: {msg["key"]}')
+            dprint(f'redirecting GET to leader: {self.leader} (key: {msg["key"]}')
             self.send_msg(msg['src'], 'redirect', {'MID': msg['MID']})
         # TODO: might need to send fail here if there is no known leader
         #  (or maybe not depending on how this is graded)
 
     def handle_put(self, msg):
         if self.state == State.LEADER:
-            # dprint(f'executing PUT (mid: {msg["MID"]}, key {msg["key"]})')
-            self.log.append(Entry(self.current_term, msg['key'], msg['value'], msg['src'], msg['MID']))
+            dprint(f'executing PUT (mid: {msg["MID"]}, key {msg["key"]})')
+            self.log.append(Entry(self.current_term, msg['key'], msg['value'], msg['src'], msg['dst'], msg['MID']))
             # TODO: replicate the put and make sure it was good before sending ok message
             #        Note that new entries are send out in the next routine heartbeat message
             for dst in self.others:
                 self.send_update(dst)
         else:
-            # log(f'redirecting PUT to leader (key: {msg["key"]}, value: {msg["value"]})')
+            dprint(f'redirecting PUT to leader: {self.leader} (key: {msg["key"]}, value: {msg["value"]})')
             self.send_msg(msg['src'], 'redirect', {'MID': msg['MID']})
 
     def handle_request_vote(self, msg):
@@ -237,7 +264,7 @@ class Replica:
             # other replica is more up to date, update term and send vote
             self.state = State.FOLLOWER
             self.voted_for = msg['src']
-            # dprint(f'voting for {msg["src"]} (term: {self.current_term})')
+            dprint(f'voting for {msg["src"]} (term: {self.current_term})')
             self.send_msg(msg['src'], 'request_vote_response', {'term': self.current_term})
 
     def handle_request_vote_response(self, msg):
@@ -252,7 +279,7 @@ class Replica:
                 self.leader = self.id
                 self.match_index = dict.fromkeys(self.others, -1)
                 self.next_index = dict.fromkeys(self.others, len(self.log))
-                # dprint(f"I'm the leader now!!! (term={self.current_term})")
+                dprint(f"I'm the leader now!!! (term={self.current_term})")
                 self.send_heartbeat()
 
     # {'term': self.current_term,
@@ -285,7 +312,7 @@ class Replica:
                     self.log += entries
                     # dprint(f'received entries: {len(entries)}')
                     # for entry in entries:
-                        # dprint(f'successfully added {entry.key} to log, up to index {len(self.log) - 1})')
+                    # dprint(f'successfully added {entry.key} to log, up to index {len(self.log) - 1})')
                     self.send_msg(msg['src'], 'append_response', {'success': True, 'match_index': len(self.log) - 1})
                 else:
                     # logs don't match, send a failure message
@@ -299,7 +326,9 @@ class Replica:
             self.match_index[msg['src']] = msg['match_index']
             self.next_index[msg['src']] = msg['match_index'] + 1
             self.apply_safe_entries()
-            # dprint(f'received confirmation that key indexes up to {msg["match_index"]} are replicated on {msg["src"]}')
+            self.respond_to_gets()
+            # dprint(f'received confirmation that key indexes up to {msg["match_index"]} are replicated on {msg[
+            # "src"]}')
         else:
             self.next_index[msg['src']] -= 1
             self.send_update(msg['src'])
@@ -331,7 +360,8 @@ class Replica:
 
     # send append RPCs to other servers to ensure their log matches this servers log
     def send_update(self, dst):
-        dprint(f'sending updates to {dst}')#, highest log index = {len(self.log) - 1}, next index: {self.next_index[dst]}')
+        # dprint(f'sending updates to {dst}')  # , highest log index = {len(self.log) - 1}, next index: {
+        # self.next_index[dst]}')
         if self.next_index[dst] <= len(self.log) - 1:
             prev_index = self.next_index[dst] - 1
             prev_term = self.log[prev_index].term if prev_index >= 0 else -1
@@ -339,6 +369,17 @@ class Replica:
             start_index = prev_index + 1
             end_index = min(prev_index + 1 + max_entries, len(self.log))
             self.send_append(dst, prev_index, prev_term, self.log[start_index:end_index])
+
+    def respond_to_gets(self):
+        # find the latest time that we've heard from the majority of servers
+        latest = sorted(self.last_heard.values())[self.maj_thresh - 1]
+
+        for get in list(self.gets):
+            if get.time <= latest:
+                dprint(f'completing GET (mid: {get.mid}, key {get.key})')
+                self.gets.remove(get)
+                self.send_msg(get.src, 'ok', {'MID': get.mid,
+                                              'value': self.state_machine[get.key]})
 
 
 # returns the current time since the epoch in ms
@@ -366,4 +407,8 @@ if __name__ == '__main__':
     replica.run()
 
 # TODO:
-#  1. Some entries are not getting replicated normally (no leader fails)
+#  1. Only send ok conformation for a commit if we were the one that receive the client request
+#     (same thing as commenting entries, only commit entries from current term, not past terms)
+#     shouldn't this already be enforced???
+#  2. After the second leader dies, no gets are getting responded to
+#     maybe check to make sure the calculations for _latest_ and comparisons to _maj_thresh_ are correct
