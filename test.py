@@ -67,5 +67,5 @@ def measure_times(file):
 
 
 with open('output.txt', 'r') as f:
-    measure_times(f)
+    measure_failure(f)
 

@@ -265,6 +265,7 @@ class Replica:
             # other replica is more up to date, update term and send vote
             self.state = State.FOLLOWER
             self.leader = 'FFFF'
+            self.last_append_time = now()
             dprint('got vote request, reverting to follower')
             self.voted_for = msg['src']
             dprint(f'voting for {msg["src"]} (term: {self.current_term})')
@@ -291,10 +292,6 @@ class Replica:
     #  'entries': entries,
     #  'leader_commit': self.commit_index}
     def handle_append(self, msg):
-        # sanity check
-        if self.state == State.LEADER:
-            return
-
         # decode entry objects from dictionaries
         entries = list(map(lambda e: Entry.decode(e), msg['entries']))
 
@@ -324,6 +321,8 @@ class Replica:
             else:
                 # there are no new entries (this was just a heartbeat message)
                 self.send_msg(msg['src'], 'append_response', {'success': True, 'match_index': len(self.log) - 1})
+        else:
+            dprint(f'rejecting append from {msg["src"]}')
 
     def handle_append_response(self, msg):
         if msg['success']:
@@ -409,6 +408,8 @@ if __name__ == '__main__':
     replica.run()
 
 # TODO:
-#  1. Fix election process for hard partitions
+#  1. Leaders needs to step down in hard partition when they can't reach the majority of servers
+#       - they will never be able to complete a get/put since they can't access the majority of servers
+#       - they need to be able to redirect to 'FFFF' so requests can be retried with the leader with a quorum
 #  1. Implement batching
 #  3. (maybe detect when servers have died and stop sending them messages?)
