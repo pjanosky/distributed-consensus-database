@@ -19,6 +19,9 @@ class State(Enum):
     CANDIDATE = 'candidate'
     FOLLOWER = 'follower'
 
+    def __str__(self):
+        return self.value
+
 
 class Entry:
     def __init__(self, term, key, value, src, dst, mid):
@@ -152,8 +155,8 @@ class Replica:
                 exit('invalid term value (terms increase monotonically)')
 
     def begin_election(self):
-        dprint('--------------------- starting election ---------------------')
         self.new_term()
+        dprint(f'--------------------- starting election (term: {self.current_term}) ---------------------')
         self.last_append_time = now()
         self.state = State.CANDIDATE
         self.voted_for = self.id
@@ -251,7 +254,7 @@ class Replica:
             for dst in self.others:
                 self.send_update(dst)
         else:
-            dprint(f'redirecting PUT to {self.leader} (mid: {msg["MID"]}, key: {msg["key"]}, value: {msg["value"]})')
+            dprint(f'redirecting PUT to {self.leader} (state: {self.state}, mid: {msg["MID"]}, key: {msg["key"]}, value: {msg["value"]})')
             self.send_msg(msg['src'], 'redirect', {'MID': msg['MID']})
 
     def handle_request_vote(self, msg):
@@ -261,6 +264,8 @@ class Replica:
         if self.current_term <= msg['term'] and self.voted_for is None and not self.more_updated(msg):
             # other replica is more up to date, update term and send vote
             self.state = State.FOLLOWER
+            self.leader = 'FFFF'
+            dprint('got vote request, reverting to follower')
             self.voted_for = msg['src']
             dprint(f'voting for {msg["src"]} (term: {self.current_term})')
             self.send_msg(msg['src'], 'request_vote_response', {'term': self.current_term})
@@ -297,6 +302,7 @@ class Replica:
             # this is a currently valid append RCP
             self.last_append_time = now()
             self.state = State.FOLLOWER
+            dprint(f'got append from {msg["src"]}, reverting to follower')
             self.leader = msg['src']
             self.new_term(msg['term'])
             self.commit(msg['leader_commit'])
@@ -403,5 +409,6 @@ if __name__ == '__main__':
     replica.run()
 
 # TODO:
+#  1. Fix election process for hard partitions
 #  1. Implement batching
-#  2. (maybe detect when servers have died and stop sending them messages)
+#  3. (maybe detect when servers have died and stop sending them messages?)
