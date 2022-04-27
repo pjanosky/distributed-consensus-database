@@ -247,6 +247,9 @@ class Replica:
 
     def handle_put(self, msg):
         if self.state == State.LEADER:
+            if self.has_mid(msg['MID']):
+                self.send_msg(msg['src'], 'ok', {'MID': msg['mid']})
+                return
             dprint(f'executing PUT (mid: {msg["MID"]}, key {msg["key"]})')
             self.log.append(Entry(self.current_term, msg['key'], msg['value'], msg['src'], msg['dst'], msg['MID']))
             # TODO: replicate the put and make sure it was good before sending ok message
@@ -381,6 +384,9 @@ class Replica:
                 self.send_msg(get.src, 'ok', {'MID': get.mid,
                                               'value': self.state_machine[get.key]})
                 dprint(f'completed GET (mid: {get.mid}, key {get.key})')
+
+    def has_mid(self, mid):
+        return len(list(filter(lambda e: e.mid == mid, self.log))) > 0
 
 
 # returns the current time since the epoch in ms
