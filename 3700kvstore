@@ -10,8 +10,9 @@ from enum import Enum
 
 BROADCAST = "FFFF"
 SEED = 0
-ELECTION_TIMEOUT_RANGE = range(150, 300)
-HEARTBEAT_FREQUENCY = 135
+ELECTION_TIMEOUT_RANGE = range(200, 350)
+HEARTBEAT_FREQUENCY = 100
+RESPONSE_TIMEOUT = 225 * 2
 
 
 class State(Enum):
@@ -102,6 +103,7 @@ class Replica:
 
         # send hello message
         dprint('Replica %s starting up' % self.id)
+        dprint(f'majority threshold {self.maj_thresh}')
         self.send_msg(BROADCAST, 'hello', {})
 
     def send(self, msg):
@@ -132,7 +134,15 @@ class Replica:
                 if now() >= self.last_append_time + HEARTBEAT_FREQUENCY:
                     # send heartbeats
                     self.send_heartbeat()
-                timeout = HEARTBEAT_FREQUENCY - (now() - self.last_append_time)
+                latest = sorted(self.last_heard.values())[self.maj_thresh - 1]
+                if now() >= latest + RESPONSE_TIMEOUT:
+                    # we haven't heard for the majority of servers in a while (might be a minority partition)
+                    # step down
+                    self.state = State.FOLLOWER
+                    self.leader = 'FFFF'
+                    dprint('haven\'t heard from majority, stepping down')
+                timeout = min(HEARTBEAT_FREQUENCY - (now() - self.last_append_time),
+                              RESPONSE_TIMEOUT - (now() - latest))
             elif now() >= self.last_append_time + self.election_timeout:
                 # we are not the leader, check if an election needs to be started
                 self.begin_election()
@@ -173,7 +183,7 @@ class Replica:
     def send_heartbeat(self):
         dprint('sending heartbeat')
         for dst in self.others:
-            self.send_append(dst, None, None, [])
+            self.send_update(dst, force=True)
 
     def send_append(self, dst, prev_index, prev_term, entries):
         self.last_append_time = now()
@@ -185,10 +195,14 @@ class Replica:
 
     def commit(self, index):
         # ensure index is valid
-        if index < self.commit_index:
-            exit('commit index must increase monotonically')
-        elif index == self.commit_index:
+        if index <= self.commit_index:
+            if index < self.commit_index:
+                dprint('received a commit index that was too low')
             return
+        else:
+            if index > len(self.log) - 1:
+                dprint('received a commit index that was too high')
+            index = min(index, len(self.log) - 1)
 
         # apply commands to state machine
         for entry in self.log[self.commit_index + 1:index + 1]:
@@ -222,23 +236,10 @@ class Replica:
 
     def handle_get(self, msg):
         if self.state == State.LEADER:
-            if msg['key'] in self.state_machine:
-                dprint(f'executing GET (mid: {msg["MID"]}, key {msg["key"]})')
-                for dst in self.others:
-                    self.send_append(dst, None, None, [])
-                self.gets.add(Get(msg['src'], msg['key'], msg['MID']))
-            else:
-                print(f'can\'t find value for  GET (mid: {msg["MID"]}, key {msg["key"]})', flush=True)
-                print(
-                    f'commit index: {self.commit_index}, highest log index: {len(self.log) - 1}, len state machine '
-                    f'{len(self.state_machine)}',
-                    flush=True)
-                # print('\n\t'.join(list(map(lambda k: f'key: {k}, value: {self.state_machine[k]}',
-                # self.state_machine))), flush=True)
-                self.send_msg(msg['src'], 'ok', {'MID': msg['MID'],
-                                                 'value': ''})
-                time.sleep(1)
-                exit('FAILED A GET')
+            dprint(f'executing GET (mid: {msg["MID"]}, key {msg["key"]})')
+            for dst in self.others:
+                self.send_update(dst, force=True)
+            self.gets.add(Get(msg['src'], msg['key'], msg['MID']))
         else:
             dprint(f'redirecting GET to {self.leader} (mid: {msg["MID"]}, key: {msg["key"]}')
             self.send_msg(msg['src'], 'redirect', {'MID': msg['MID']})
@@ -257,7 +258,9 @@ class Replica:
             for dst in self.others:
                 self.send_update(dst)
         else:
-            dprint(f'redirecting PUT to {self.leader} (state: {self.state}, mid: {msg["MID"]}, key: {msg["key"]}, value: {msg["value"]})')
+            dprint(
+                f'redirecting PUT to {self.leader} (state: {self.state}, mid: {msg["MID"]}, key: {msg["key"]}, '
+                f'value: {msg["value"]})')
             self.send_msg(msg['src'], 'redirect', {'MID': msg['MID']})
 
     def handle_request_vote(self, msg):
@@ -271,8 +274,18 @@ class Replica:
             self.last_append_time = now()
             dprint('got vote request, reverting to follower')
             self.voted_for = msg['src']
-            dprint(f'voting for {msg["src"]} (term: {self.current_term})')
+            dprint(f'voting for {msg["src"]} (term: {self.current_term})'
+                   f'term: {self.current_term}, other term: {msg["term"]}, '
+                   f'log_term: {self.log[-1].term if len(self.log) > 0 else -1}, other log_term '
+                   f'{msg["last_log_term"]}, '
+                   f'log_inx: {len(self.log) - 1}, other log_inx: {msg["last_log_index"]})')
             self.send_msg(msg['src'], 'request_vote_response', {'term': self.current_term})
+        else:
+            dprint(f'rejecting vote for {msg["src"]} (voted for: {self.voted_for}, '
+                   f'term: {self.current_term}, other term: {msg["term"]}, '
+                   f'log_term: {self.log[-1].term if len(self.log) > 0 else -1}, other log_term '
+                   f'{msg["last_log_term"]}, '
+                   f'log_inx: {len(self.log) - 1}, other log_inx: {msg["last_log_index"]})')
 
     def handle_request_vote_response(self, msg):
         if self.state == State.CANDIDATE and msg['term'] == self.current_term:
@@ -305,7 +318,6 @@ class Replica:
             dprint(f'got append from {msg["src"]}, reverting to follower')
             self.leader = msg['src']
             self.new_term(msg['term'])
-            self.commit(msg['leader_commit'])
 
             if len(msg['entries']) > 0:
                 # there are new entries to add, try to add them
@@ -314,24 +326,27 @@ class Replica:
                     # logs match, add entries
                     del self.log[msg['prev_log_index'] + 1:len(self.log)]
                     self.log += entries
-                    # dprint(f'received entries: {len(entries)}')
-                    for entry in entries:
-                        dprint(f'successfully added {entry.key} to log, up to index {len(self.log) - 1})')
+                    # for entry in entries:
+                    #     dprint(f'successfully added {entry.key} to log, up to index {len(self.log) - 1})')
                     self.send_msg(msg['src'], 'append_response', {'success': True, 'match_index': len(self.log) - 1})
+                    self.commit(msg['leader_commit'])
                 else:
                     # logs don't match, send a failure message
+                    dprint(f'rejecting append from {msg["src"]}, logs don\'t match')
                     self.send_msg(msg['src'], 'append_response', {'success': False})
             else:
                 # there are no new entries (this was just a heartbeat message)
                 self.send_msg(msg['src'], 'append_response', {'success': True, 'match_index': len(self.log) - 1})
+                self.commit(msg['leader_commit'])
         else:
-            dprint(f'rejecting append from {msg["src"]}')
+            dprint(f'rejecting append from {msg["src"]}, wrong term')
 
     def handle_append_response(self, msg):
         if msg['success']:
             self.match_index[msg['src']] = msg['match_index']
             self.next_index[msg['src']] = msg['match_index'] + 1
-            dprint(f'received confirmation that key indexes up to {msg["match_index"]} are replicated on {msg["src"]}')
+            # dprint(f'received confirmation that key indexes up to {msg["match_index"]} are replicated on {msg[
+            # "src"]}')
             self.apply_safe_entries()
             self.respond_to_gets()
         else:
@@ -364,8 +379,11 @@ class Replica:
         self.commit(highest)
 
     # send append RPCs to other servers to ensure their log matches this servers log
-    def send_update(self, dst):
-        dprint(f'sending updates to {dst}, highest log index = {len(self.log) - 1}, next index: {self.next_index[dst]}')
+    # force: make sure an append RPC is sent out no matter what
+    # (sends a heartbeat message if there's no new entries to send)
+    def send_update(self, dst, force=False):
+        # dprint(f'sending updates to {dst}, highest log index = {len(self.log) - 1}, next index: {self.next_index[
+        # dst]}')
         if self.next_index[dst] <= len(self.log) - 1:
             prev_index = self.next_index[dst] - 1
             prev_term = self.log[prev_index].term if prev_index >= 0 else -1
@@ -373,6 +391,8 @@ class Replica:
             start_index = prev_index + 1
             end_index = min(prev_index + 1 + max_entries, len(self.log))
             self.send_append(dst, prev_index, prev_term, self.log[start_index:end_index])
+        elif force:
+            self.send_append(dst, None, None, [])
 
     def respond_to_gets(self):
         # find the latest time that we've heard from the majority of servers
@@ -381,9 +401,14 @@ class Replica:
         for get in list(self.gets):
             if get.time <= latest:
                 self.gets.remove(get)
-                self.send_msg(get.src, 'ok', {'MID': get.mid,
-                                              'value': self.state_machine[get.key]})
-                dprint(f'completed GET (mid: {get.mid}, key {get.key})')
+                if get.key in self.state_machine:
+                    self.send_msg(get.src, 'ok', {'MID': get.mid,
+                                                  'value': self.state_machine[get.key]})
+                    dprint(f'completed GET (mid: {get.mid}, key {get.key})')
+                else:
+                    self.send_msg(get.src, 'ok', {'MID': get.mid,
+                                                  'value': ''})
+                    dprint(f'can\'t find value for  GET (mid: {get.mid}, key {get.key})')
 
     def has_mid(self, mid):
         return len(list(filter(lambda e: e.mid == mid, self.log))) > 0
