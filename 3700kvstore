@@ -9,11 +9,11 @@ import random
 from enum import Enum
 
 BROADCAST = "FFFF"
-SEED = 0
-ELECTION_TIMEOUT_RANGE = range(200, 350)
-HEARTBEAT_FREQUENCY = 100
-RESPONSE_TIMEOUT = 225 * 2
-BATCH_FREQ = 17
+SEED = None
+ELECTION_TIMEOUT_RANGE = range(300, 450)
+HEARTBEAT_FREQUENCY = 140
+RESPONSE_TIMEOUT = (ELECTION_TIMEOUT_RANGE.start + ELECTION_TIMEOUT_RANGE.stop) / 2 * 1.5
+BATCH_FREQ = 40
 
 
 class State(Enum):
@@ -91,8 +91,7 @@ class Replica:
         self.append_queue = set()
         self.queue_start = 0
 
-        self.sends = 0
-        self.app_sends = 0
+        self.sends = dict.fromkeys(['request_vote', 'request_vote_response', 'append', 'append_response'], 0)
 
         # initialize leader data
         # map from id to the index of the highest log entry known to be on the server
@@ -117,9 +116,8 @@ class Replica:
         self.socket.sendto(json.dumps(msg).encode('utf-8'), ('localhost', self.port))
 
     def send_msg(self, dst, type, keys):
-        self.sends += 1
-        if type == 'append' or type == 'append_response':
-            self.app_sends += 1
+        if type in self.sends:
+            self.sends[type] += 1
         msg = {'src': self.id,
                'dst': dst,
                'leader': self.leader,
@@ -198,7 +196,7 @@ class Replica:
 
     def send_heartbeat(self):
         dprint(f'sending heartbeat (time diff {now() - self.queue_start})')
-        dprint(f'total sent: {self.sends}, appends/appends_responses: {self.app_sends}')
+        dprint(f'total message: {sum(self.sends.values())}, {self.sends}')
         self.empty_queue()
         for dst in self.others:
             self.send_update(dst, force=True)
@@ -224,7 +222,7 @@ class Replica:
 
         # apply commands to state machine
         for entry in self.log[self.commit_index + 1:index + 1]:
-            # dprint(f'committing key {entry.key}, value {entry.value} to state machine (mid={entry.mid})')
+            dprint(f'committing key {entry.key}, value {entry.value} to state machine (mid={entry.mid})')
             self.state_machine[entry.key] = entry.value
             if self.state == State.LEADER and entry.dst == self.id:
                 self.send_msg(entry.src, 'ok', {'MID': entry.mid})
@@ -471,7 +469,8 @@ def parse_args():
 if __name__ == '__main__':
     args = parse_args()
     replica = Replica(args.port, args.id, args.others)
-    random.seed(SEED)
+    if SEED is not None:
+        random.seed(SEED)
     replica.run()
 
 # TODO:
