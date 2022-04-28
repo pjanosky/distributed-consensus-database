@@ -10,10 +10,11 @@ from enum import Enum
 
 BROADCAST = "FFFF"
 SEED = None
-ELECTION_TIMEOUT_RANGE = range(300, 450)
-HEARTBEAT_FREQUENCY = 140
-RESPONSE_TIMEOUT = (ELECTION_TIMEOUT_RANGE.start + ELECTION_TIMEOUT_RANGE.stop) / 2 * 1.5
-BATCH_FREQ = 40
+ELECTION_TIMEOUT_RANGE = range(400, 650)
+HEARTBEAT_FREQUENCY = 175
+RESPONSE_TIMEOUT = int((ELECTION_TIMEOUT_RANGE.start + ELECTION_TIMEOUT_RANGE.stop) / 2 * 1.5)
+BATCHING = False
+BATCH_FREQ = 10
 
 
 class State(Enum):
@@ -88,7 +89,7 @@ class Replica:
         self.commit_index = -1
         self.gets = set()
 
-        self.append_queue = set()
+        self.append_queue = dict.fromkeys(self.others, None)
         self.queue_start = 0
 
         self.sends = dict.fromkeys(['request_vote', 'request_vote_response', 'append', 'append_response'], 0)
@@ -156,7 +157,7 @@ class Replica:
                 self.begin_election()
                 timeout = self.election_timeout - (now() - self.last_append_time)
 
-            if len(self.append_queue) > 0:
+            if BATCHING and not self.queue_is_empty():
                 if now() - self.queue_start >= BATCH_FREQ:
                     dprint(f'flushing queue (time diff: {now() - self.queue_start})')
                     self.flush_queue()
@@ -224,7 +225,8 @@ class Replica:
         for entry in self.log[self.commit_index + 1:index + 1]:
             dprint(f'committing key {entry.key}, value {entry.value} to state machine (mid={entry.mid})')
             self.state_machine[entry.key] = entry.value
-            if self.state == State.LEADER and entry.dst == self.id:
+            if self.state == State.LEADER:
+                # and entry.dst == self.id: (taken out since duplicate responses are better than inconsistency)
                 self.send_msg(entry.src, 'ok', {'MID': entry.mid})
                 dprint(f'completed PUT (mid: {entry.mid}, time: {now()})')
 
@@ -254,7 +256,10 @@ class Replica:
         if self.state == State.LEADER:
             dprint(f'executing GET (mid: {msg["MID"]}, key {msg["key"]})')
             for dst in self.others:
-                self.queue_update(dst)
+                if BATCHING:
+                    self.queue_update(dst, force=True)  # TODO: send or queue??
+                else:
+                    self.send_update(dst, force=True)
             self.gets.add(Get(msg['src'], msg['key'], msg['MID']))
         else:
             dprint(f'redirecting GET to {self.leader} (mid: {msg["MID"]}, key: {msg["key"]}')
@@ -272,7 +277,10 @@ class Replica:
             # TODO: replicate the put and make sure it was good before sending ok message
             #        Note that new entries are send out in the next routine heartbeat message
             for dst in self.others:
-                self.queue_update(dst)
+                if BATCHING:
+                    self.queue_update(dst)  # TODO: send or queue??
+                else:
+                    self.send_update(dst)
         else:
             dprint(
                 f'redirecting PUT to {self.leader} (state: {self.state}, mid: {msg["MID"]}, key: {msg["key"]}, '
@@ -370,7 +378,10 @@ class Replica:
             self.respond_to_gets()
         else:
             self.next_index[msg['src']] -= 1
-            self.queue_update(msg['src'])
+            if BATCHING:
+                self.queue_update(msg['src'])  # TODO: send or queue??
+            else:
+                self.send_update(msg['src'])
 
     # returns True if this replica's log is more up to date than the log of another
     # replica described in a vote request message
@@ -433,19 +444,26 @@ class Replica:
 
     # queue an append message to be send
     # batches together multiple append messages sent close together to reduce number of total messages
-    def queue_update(self, dst):
+    def queue_update(self, dst, force=False):
         dprint(f'adding {dst} to queue')
-        if len(self.append_queue) == 0:
+        if self.queue_is_empty():
             self.queue_start = now()
-        self.append_queue.add(dst)
+        self.append_queue[dst] = force
 
     def flush_queue(self):
         for dst in self.append_queue:
-            self.send_update(dst)
-        self.append_queue = set()
+            if self.append_queue[dst] is not None:
+                self.send_update(dst, self.append_queue[dst])
+        self.empty_queue()
+
+    def queue_is_empty(self):
+        for dst in self.append_queue:
+            if self.append_queue[dst] is not None:
+                return False
+        return True
 
     def empty_queue(self):
-        self.append_queue = set()
+        self.append_queue = dict.fromkeys(self.others, None)
 
 
 # returns the current time since the epoch in ms
@@ -474,8 +492,8 @@ if __name__ == '__main__':
     replica.run()
 
 # TODO:
-#  1. Leaders needs to step down in hard partition when they can't reach the majority of servers
-#       - they will never be able to complete a get/put since they can't access the majority of servers
-#       - they need to be able to redirect to 'FFFF' so requests can be retried with the leader with a quorum
-#  1. Implement batching
-#  3. (maybe detect when servers have died and stop sending them messages?)
+#  1. Problem when confirming that data is not stale for a get
+#
+#
+#
+#
