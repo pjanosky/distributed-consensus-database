@@ -13,7 +13,7 @@ SEED = 0
 ELECTION_TIMEOUT_RANGE = range(200, 350)
 HEARTBEAT_FREQUENCY = 100
 RESPONSE_TIMEOUT = 225 * 2
-BATCH_FREQ = 10
+BATCH_FREQ = 20
 
 
 class State(Enum):
@@ -88,6 +88,9 @@ class Replica:
         self.commit_index = -1
         self.gets = set()
 
+        self.append_queue = set()
+        self.queue_start = 0
+
         self.sends = 0
         self.app_sends = 0
 
@@ -155,6 +158,12 @@ class Replica:
                 self.begin_election()
                 timeout = self.election_timeout - (now() - self.last_append_time)
 
+            if len(self.append_queue) > 0:
+                if now() - self.queue_start >= BATCH_FREQ:
+                    dprint(f'flushing queue (time diff: {now() - self.queue_start})')
+                    self.flush_queue()
+                timeout = min(timeout, now() - self.queue_start)
+
     def new_term(self, new_term=None):
         # increment term
         if new_term is None:
@@ -188,8 +197,9 @@ class Replica:
                                                 'last_log_index': len(self.log) - 1})
 
     def send_heartbeat(self):
-        dprint('sending heartbeat')
+        dprint(f'sending heartbeat (time diff {now() - self.queue_start})')
         dprint(f'total sent: {self.sends}, appends/appends_responses: {self.app_sends}')
+        self.empty_queue()
         for dst in self.others:
             self.send_update(dst, force=True)
 
@@ -245,9 +255,8 @@ class Replica:
     def handle_get(self, msg):
         if self.state == State.LEADER:
             dprint(f'executing GET (mid: {msg["MID"]}, key {msg["key"]})')
-            if now() - self.last_append_time > BATCH_FREQ:
-                for dst in self.others:
-                    self.send_update(dst, force=True)
+            for dst in self.others:
+                self.queue_update(dst)
             self.gets.add(Get(msg['src'], msg['key'], msg['MID']))
         else:
             dprint(f'redirecting GET to {self.leader} (mid: {msg["MID"]}, key: {msg["key"]}')
@@ -265,7 +274,7 @@ class Replica:
             # TODO: replicate the put and make sure it was good before sending ok message
             #        Note that new entries are send out in the next routine heartbeat message
             for dst in self.others:
-                self.send_update(dst)
+                self.queue_update(dst)
         else:
             dprint(
                 f'redirecting PUT to {self.leader} (state: {self.state}, mid: {msg["MID"]}, key: {msg["key"]}, '
@@ -335,8 +344,8 @@ class Replica:
                     # logs match, add entries
                     del self.log[msg['prev_log_index'] + 1:len(self.log)]
                     self.log += entries
-                    # for entry in entries:
-                    #     dprint(f'successfully added {entry.key} to log, up to index {len(self.log) - 1})')
+                    for entry in entries:
+                        dprint(f'successfully added {entry.key} to log, up to index {len(self.log) - 1})')
                     self.send_msg(msg['src'], 'append_response', {'success': True, 'match_index': len(self.log) - 1})
                     self.commit(msg['leader_commit'])
                 else:
@@ -354,13 +363,12 @@ class Replica:
         if msg['success']:
             self.match_index[msg['src']] = msg['match_index']
             self.next_index[msg['src']] = msg['match_index'] + 1
-            # dprint(f'received confirmation that key indexes up to {msg["match_index"]} are replicated on {msg[
-            # "src"]}')
+            dprint(f'received confirmation that key indexes up to {msg["match_index"]} are replicated on {msg["src"]}')
             self.apply_safe_entries()
             self.respond_to_gets()
         else:
             self.next_index[msg['src']] -= 1
-            self.send_update(msg['src'])
+            self.queue_update(msg['src'])
 
     # returns True if this replica's log is more up to date than the log of another
     # replica described in a vote request message
@@ -391,8 +399,7 @@ class Replica:
     # force: make sure an append RPC is sent out no matter what
     # (sends a heartbeat message if there's no new entries to send)
     def send_update(self, dst, force=False):
-        # dprint(f'sending updates to {dst}, highest log index = {len(self.log) - 1}, next index: {self.next_index[
-        # dst]}')
+        dprint(f'sending updates to {dst}, highest log index = {len(self.log) - 1}, next index: {self.next_index[dst]}')
         if self.next_index[dst] <= len(self.log) - 1:
             prev_index = self.next_index[dst] - 1
             prev_term = self.log[prev_index].term if prev_index >= 0 else -1
@@ -421,6 +428,22 @@ class Replica:
 
     def has_mid(self, mid):
         return len(list(filter(lambda e: e.mid == mid, self.log))) > 0
+
+    # queue an append message to be send
+    # batches together multiple append messages sent close together to reduce number of total messages
+    def queue_update(self, dst):
+        dprint(f'adding {dst} to queue')
+        if len(self.append_queue) == 0:
+            self.queue_start = now()
+        self.append_queue.add(dst)
+
+    def flush_queue(self):
+        for dst in self.append_queue:
+            self.send_update(dst)
+        self.append_queue = set()
+
+    def empty_queue(self):
+        self.append_queue = set()
 
 
 # returns the current time since the epoch in ms
