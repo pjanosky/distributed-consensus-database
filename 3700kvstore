@@ -13,7 +13,7 @@ SEED = 0
 ELECTION_TIMEOUT_RANGE = range(200, 350)
 HEARTBEAT_FREQUENCY = 100
 RESPONSE_TIMEOUT = 225 * 2
-BATCH_FREQ = 20
+BATCH_FREQ = 17
 
 
 class State(Enum):
@@ -269,7 +269,7 @@ class Replica:
             if self.has_mid(msg['MID']):
                 self.send_msg(msg['src'], 'ok', {'MID': msg['mid']})
                 return
-            dprint(f'executing PUT (mid: {msg["MID"]}, key {msg["key"]})')
+            dprint(f'executing PUT (mid: {msg["MID"]}, key {msg["key"]}, value: {msg["value"]}, index: {len(self.log)})')
             self.log.append(Entry(self.current_term, msg['key'], msg['value'], msg['src'], msg['dst'], msg['MID']))
             # TODO: replicate the put and make sure it was good before sending ok message
             #        Note that new entries are send out in the next routine heartbeat message
@@ -292,8 +292,8 @@ class Replica:
             self.last_append_time = now()
             dprint('got vote request, reverting to follower')
             self.voted_for = msg['src']
-            dprint(f'voting for {msg["src"]} (term: {self.current_term})'
-                   f'term: {self.current_term}, other term: {msg["term"]}, '
+            dprint(f'voting for {msg["src"]} '
+                   f'(term: {self.current_term}, other term: {msg["term"]}, '
                    f'log_term: {self.log[-1].term if len(self.log) > 0 else -1}, other log_term '
                    f'{msg["last_log_term"]}, '
                    f'log_inx: {len(self.log) - 1}, other log_inx: {msg["last_log_index"]})')
@@ -308,6 +308,7 @@ class Replica:
     def handle_request_vote_response(self, msg):
         if self.state == State.CANDIDATE and msg['term'] == self.current_term:
             # we got a vote
+            dprint(f'got vote from {msg["src"]}')
             self.votes.add(msg['src'])
 
             # check if we have enough votes to win
@@ -319,6 +320,9 @@ class Replica:
                 self.next_index = dict.fromkeys(self.others, len(self.log))
                 dprint(f"I'm the leader now!!! (term={self.current_term})")
                 self.send_heartbeat()
+        else:
+            dprint(f'rejecting vote from {msg["src"]} '
+                   f'(state: {self.state}, term: {self.current_term}, other term: {msg["term"]})')
 
     # {'term': self.current_term,
     #  'prev_log_index': prev_index,
@@ -391,7 +395,7 @@ class Replica:
             if replications >= self.maj_thresh and self.log[index].term == self.current_term:
                 highest = index
 
-        # dprint(f'highest: {highest}')
+        dprint(f'highest: {highest}')
         # commit it
         self.commit(highest)
 

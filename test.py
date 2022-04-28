@@ -19,8 +19,8 @@ def measure_failure(file):
             i = line.find('mid: ')
             gets_resp.append(line[i + 5:i + 5 + 16])
 
-    print(f'GETs: {len(gets)}, requests, {len(gets_resp)} responses')
-    print(f'PUTs: {len(puts)} requests, {len(puts_resp)} responses')
+    print(f'GETs: {len(gets)}, requests, {len(gets_resp)} responses ({len(gets) - len(gets_resp)} unanswered)')
+    print(f'PUTs: {len(puts)} requests, {len(puts_resp)} responses ({len(puts) - len(puts_resp)} unanswered)')
     print(f'unanswered GETs {set(gets).difference(set(gets_resp))}')
     print(f'unanswered PUTs {set(puts).difference(set(puts_resp))}')
 
