@@ -13,6 +13,7 @@ SEED = 0
 ELECTION_TIMEOUT_RANGE = range(200, 350)
 HEARTBEAT_FREQUENCY = 100
 RESPONSE_TIMEOUT = 225 * 2
+BATCH_FREQ = 10
 
 
 class State(Enum):
@@ -87,6 +88,9 @@ class Replica:
         self.commit_index = -1
         self.gets = set()
 
+        self.sends = 0
+        self.app_sends = 0
+
         # initialize leader data
         # map from id to the index of the highest log entry known to be on the server
         self.match_index = dict.fromkeys(self.others, -1)
@@ -110,6 +114,9 @@ class Replica:
         self.socket.sendto(json.dumps(msg).encode('utf-8'), ('localhost', self.port))
 
     def send_msg(self, dst, type, keys):
+        self.sends += 1
+        if type == 'append' or type == 'append_response':
+            self.app_sends += 1
         msg = {'src': self.id,
                'dst': dst,
                'leader': self.leader,
@@ -182,6 +189,7 @@ class Replica:
 
     def send_heartbeat(self):
         dprint('sending heartbeat')
+        dprint(f'total sent: {self.sends}, appends/appends_responses: {self.app_sends}')
         for dst in self.others:
             self.send_update(dst, force=True)
 
@@ -237,8 +245,9 @@ class Replica:
     def handle_get(self, msg):
         if self.state == State.LEADER:
             dprint(f'executing GET (mid: {msg["MID"]}, key {msg["key"]})')
-            for dst in self.others:
-                self.send_update(dst, force=True)
+            if now() - self.last_append_time > BATCH_FREQ:
+                for dst in self.others:
+                    self.send_update(dst, force=True)
             self.gets.add(Get(msg['src'], msg['key'], msg['MID']))
         else:
             dprint(f'redirecting GET to {self.leader} (mid: {msg["MID"]}, key: {msg["key"]}')
