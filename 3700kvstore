@@ -188,10 +188,10 @@ class Replica:
         self.last_heard = dict.fromkeys(self.others, 0)
 
         # start a new term
-        self.new_term(0)
+        self.set_term(0)
 
         # send hello message
-        dprint(f'Replica {self.id} starting up')
+        print(f'Replica {self.id} starting up', flush=True)
         self.send_msg(BROADCAST, 'hello', {})
 
     def run(self):
@@ -199,7 +199,7 @@ class Replica:
         Runs this replica, receiving and responding to messages from clients and other servers.
         """
 
-        timeout = self.election_timeout - (now() - self.app_recv_time)
+        timeout = self.election_timeout - (now() - self.app_recv_time)  # time to wait before resuming (in ms)
 
         while True:
             socks = select.select([self.socket], [], [], float(max(0, timeout)) / 1000)[0]
@@ -226,20 +226,42 @@ class Replica:
                 self.begin_election()
                 timeout = self.election_timeout - (now() - self.app_recv_time)
 
-    def send_msg(self, dst, type, keys):
+    def send_msg(self, dst, type, headers):
+        """
+        Sends a message to the simulator.
+
+        Args:
+            dst (str): the address message's destination
+            type (str): the type of the message
+            headers (dict): additional headers to add to the message
+        """
+
         msg = {'src': self.id,
                'dst': dst,
                'leader': self.leader,
                'type': type}
-        msg.update(keys)
+        msg.update(headers)
         self.socket.sendto(json.dumps(msg).encode('utf-8'), ('localhost', self.port))
 
     def send_heartbeat(self):
-        dprint(f'sending heartbeat')
+        """
+        Sends an append RCP out to every replica.
+        New entries that haven't yet been replicated on other servers will also be sent
+        """
+
+        print(f'sending heartbeat', flush=True)
         for dst in self.others:
             self.send_update(dst, force=True)
 
-    def new_term(self, term):
+    def set_term(self, term):
+        """
+        Updates the current term of this replica if a higher term is provided,
+        re-initializing the data for a new term.
+
+        Args:
+            term (int): the term to set as this replica's current term
+        """
+
         # increment term
         if term > self.current_term:
             # reinitialize voting data
@@ -248,8 +270,13 @@ class Replica:
             self.current_term = term
 
     def begin_election(self):
-        self.new_term(self.current_term + 1)
-        dprint(f'starting election (term: {self.current_term})')
+        """
+        Starts a new election by transitioning to candidate state and
+        sending vote requests to all other replicas.
+        """
+
+        self.set_term(self.current_term + 1)
+        print(f'starting election (term: {self.current_term})', flush=True)
         self.app_recv_time = now()
         self.state = State.CANDIDATE
         self.voted_for = self.id
@@ -264,6 +291,13 @@ class Replica:
                                                 'last_log_index': len(self.log) - 1})
 
     def commit(self, index):
+        """
+        Commits all uncommitted log entries up though a given index.
+
+        Args:
+            index (int): the index of the highest entry to commit
+        """
+
         # ensure valid index
         if index < self.commit_index:
             return
@@ -277,12 +311,19 @@ class Replica:
             # send response to client
             if self.state == State.LEADER:
                 self.send_msg(entry.src, 'ok', {'MID': entry.mid})
-                dprint(f'completed PUT (mid: {entry.mid}, key: {entry.key}, value: {entry.value})')
+                print(f'completed PUT (mid: {entry.mid}, key: {entry.key}, value: {entry.value})', flush=True)
 
         # increment commit index
         self.commit_index = index
 
     def handle_msg(self, msg):
+        """
+        Handles the receipt of a new message.
+
+        Args:
+            msg (dict): the dictionary representing the decoded message.
+        """
+
         # handlers for different types of messages
         handlers = {'get': self.handle_get,
                     'put': self.handle_put,
@@ -299,21 +340,37 @@ class Replica:
         if msg['type'] in handlers.keys():
             handlers[msg['type']](msg)
         else:
-            dprint(f'unknown message type: {msg["type"]}')
+            print(f'unknown message type: {msg["type"]}', flush=True)
 
     def handle_get(self, msg):
+        """
+        Handles the receipt of a get message.
+        Queues the get request, waiting until this replica's data isn't stale before responding.
+
+        Args:
+            msg (dict): the decoded get message
+        """
+
         if self.state == State.LEADER:
             # execute the request as the leader
-            dprint(f'executing GET (mid: {msg["MID"]}, key {msg["key"]})')
+            print(f'executing GET (mid: {msg["MID"]}, key {msg["key"]})', flush=True)
             for dst in self.others:
                 self.send_update(dst, force=True)
             self.gets.add(Get(msg['src'], msg['key'], msg['MID']))
         else:
             # redirect request to leader
-            dprint(f'redirecting GET to {self.leader} (mid: {msg["MID"]}, key: {msg["key"]}')
+            print(f'redirecting GET to {self.leader} (mid: {msg["MID"]}, key: {msg["key"]}', flush=True)
             self.send_msg(msg['src'], 'redirect', {'MID': msg['MID']})
 
     def handle_put(self, msg):
+        """
+        Handles the receipt of a put message.
+        Adds the command to the log and attempts to replicate it on all other server.
+
+        Args:
+            msg (dict): the decoded put message
+        """
+
         if self.state == State.LEADER:
             # execute the request as the leader
             if len(list(filter(lambda e: e.mid == msg['MID'], self.log))) > 0:
@@ -321,8 +378,8 @@ class Replica:
                 self.send_msg(msg['src'], 'ok', {'MID': msg['MID']})
             else:
                 # this is a new request, add an entry to our log
-                dprint(f'executing PUT (mid: {msg["MID"]}, key {msg["key"]}, '
-                       f'value: {msg["value"]}, index: {len(self.log)})')
+                print(f'executing PUT (mid: {msg["MID"]}, key {msg["key"]}, '
+                       f'value: {msg["value"]}, index: {len(self.log)})', flush=True)
                 self.log.append(Entry(self.current_term, msg['key'], msg['value'], msg['src'], msg['dst'], msg['MID']))
 
                 # replicate message on other servers
@@ -330,17 +387,25 @@ class Replica:
                     self.send_update(dst)
         else:
             # redirect request to leader
-            dprint(f'redirecting PUT to {self.leader}')
+            print(f'redirecting PUT to {self.leader}', flush=True)
             self.send_msg(msg['src'], 'redirect', {'MID': msg['MID']})
 
     def handle_request_vote(self, msg):
+        """
+        Handles the receipt of a request vote RPC
+        Votes for the sender if they are more up to date and this replicas hasn't already voted for this term.
+
+        Args:
+            msg (dict): the decoded request vote RPC
+        """
+
         # update our current term if we are behind
-        self.new_term(msg['term'])
+        self.set_term(msg['term'])
 
         # ensure this request is valid
         if self.current_term <= msg['term'] and self.voted_for is None and not self.more_updated(msg):
             # vote for the sender
-            dprint(f'voting for {msg["src"]}')
+            print(f'voting for {msg["src"]}', flush=True)
             self.state = State.FOLLOWER
             self.leader = BROADCAST
             self.app_recv_time = now()
@@ -348,15 +413,24 @@ class Replica:
             self.send_msg(msg['src'], 'request_vote_response', {'term': self.current_term})
 
     def handle_request_vote_response(self, msg):
+        """
+        Handles the receipt of a request vote response RPC.
+        Notes that this replica received a vote from the sender and possibly becomes
+        leader if this replica has enough votes.
+
+        Args:
+            msg (dict): the decoded request vote response RPC
+        """
+
         # check if we should accept this response
         if self.state == State.CANDIDATE and msg['term'] == self.current_term:
-            dprint(f'received vote from {msg["src"]}')
+            print(f'received vote from {msg["src"]}', flush=True)
             self.votes.add(msg['src'])
 
             # check if we have enough votes to win
             if len(self.votes) >= self.maj_thresh:
                 # we are the leader now
-                dprint(f"I'm the leader now (term {self.current_term})")
+                print(f"I'm the leader now (term {self.current_term})", flush=True)
                 self.state = State.LEADER
                 self.leader = self.id
                 self.match_index = dict.fromkeys(self.others, -1)
@@ -366,15 +440,23 @@ class Replica:
                 self.send_heartbeat()
 
     def handle_append(self, msg):
+        """
+        Handles the receipt of an append RPC.
+        Adds new entries to this replica log if the append RPC is valid for this term
+
+        Args:
+            msg (dict): the decoded append RPC
+        """
+
         # decode entry objects from dictionary
         entries = list(map(lambda e: Entry.decode(e), msg['entries']))
 
-        # ensure the Append RPC is valid for the current term
+        # ensure the append RPC is valid for the current term
         if msg['term'] >= self.current_term:
             self.app_recv_time = now()
             self.state = State.FOLLOWER
             self.leader = msg['src']
-            self.new_term(msg['term'])
+            self.set_term(msg['term'])
 
             # check if this RPC contains new entries
             if len(msg['entries']) > 0:
@@ -382,7 +464,7 @@ class Replica:
                 if msg['prev_log_index'] == -1 or (msg['prev_log_index'] < len(self.log) and
                                                    self.log[msg['prev_log_index']].term == msg['prev_log_term']):
                     # logs match, add entries
-                    dprint(f'adding new {len(entries)} new entries from {msg["src"]}')
+                    print(f'adding new {len(entries)} new entries from {msg["src"]}', flush=True)
                     del self.log[msg['prev_log_index'] + 1:len(self.log)]
                     self.log += entries
                     self.commit(msg['leader_commit'])
@@ -391,18 +473,28 @@ class Replica:
                     self.send_msg(msg['src'], 'append_response', {'success': True, 'match_index': len(self.log) - 1})
                 else:
                     # logs don't match, send a failure message
-                    dprint(f'failed to add new entries from {msg["src"]}')
+                    print(f'failed to add new entries from {msg["src"]}', flush=True)
                     self.send_msg(msg['src'], 'append_response', {'success': False})
             else:
                 # there are no new entries (this was just a heartbeat message)
-                dprint(f'received empty append message from {msg["src"]}')
+                print(f'received empty append message from {msg["src"]}', flush=True)
                 self.send_msg(msg['src'], 'append_response', {'success': True, 'match_index': len(self.log) - 1})
                 self.commit(msg['leader_commit'])
 
     def handle_append_response(self, msg):
+        """
+        Handles the receipt of an append response RPC.
+        Notes the entries replicated on the sender on success.
+        Retries the append on failure.
+
+        Args:
+            msg (dict): the decoded append response RPC
+        """
+
         if msg['success']:
             # entries were successfully added
-            dprint(f'received confirmation that log indices up to {msg["match_index"]} are replicated on {msg["src"]}')
+            print(f'received confirmation that log indices up to {msg["match_index"]} '
+                  f'are replicated on {msg["src"]}', flush=True)
             self.match_index[msg['src']] = msg['match_index']
             self.next_index[msg['src']] = msg['match_index'] + 1
             self.apply_safe_entries()
@@ -410,16 +502,21 @@ class Replica:
         else:
             # replica failed to add entries, try again with entries further back
             self.next_index[msg['src']] -= 1
-            dprint(f'retrying entry replication on {msg["src"]} with index {self.next_index[msg["src"]]}')
+            print(f'retrying entry replication on {msg["src"]} with index {self.next_index[msg["src"]]}', flush=True)
             self.send_update(msg['src'])
 
-    # send append RPCs to other servers to ensure their log matches this servers log
-    # force: make sure an append RPC is sent out no matter what
-    # (sends a heartbeat message if there's no new entries to send)
     def send_update(self, dst, force=False):
+        """
+        Sends new entries to a destination based on what entries it hasn't already replicated.
+
+        Args:
+            dst (str): the address of the server to send this message to
+            force (bool): whether to send an empty append RPC if no new entries need to be distributed.
+        """
+
         if self.next_index[dst] <= len(self.log) - 1:
             # there are new entires to send to dst
-            dprint(f'sending entries from index {self.next_index[dst]} to {dst}')
+            print(f'sending entries from index {self.next_index[dst]} to {dst}', flush=True)
             prev_index = self.next_index[dst] - 1
             prev_term = self.log[prev_index].term if prev_index >= 0 else -1
             max_entries = 10
@@ -428,10 +525,20 @@ class Replica:
             self.send_append(dst, prev_index, prev_term, self.log[start_index:end_index])
         elif force:
             # there are no new entries to send to dst, but we should send a heartbeat
-            dprint(f'sending heartbeat message to {dst}')
+            print(f'sending heartbeat message to {dst}', flush=True)
             self.send_append(dst, None, None, [])
 
     def send_append(self, dst, prev_index, prev_term, entries):
+        """
+        Sends and append RPC to the given destination.
+
+        Args:
+            dst (str): the address of the server to send this append RPC to
+            prev_index (int or None): the index of the log entry immediately before the one being sent
+            prev_term (int or NOne): the term of the log entry immediately before the first entry being sent
+            entries (list of Entry): the log entries to send in the append RCP
+        """
+
         self.app_send_times[dst] = now()
         self.send_msg(dst, 'append', {'term': self.current_term,
                                       'prev_log_index': prev_index,
@@ -439,9 +546,12 @@ class Replica:
                                       'entries': list(map(lambda e: e.encode(), entries)),
                                       'leader_commit': self.commit_index})
 
-    # commits all entries that have been replicated on a majority of servers
-    #  and applies then to this server's state machine
     def apply_safe_entries(self):
+        """
+        Commits all entries that have been replicated on a majority of servers and applies
+        them to this replica's state machine.
+        """
+
         # find the highest entry we can commit
         highest = self.commit_index
         for index in range(self.commit_index + 1, len(self.log)):
@@ -453,6 +563,10 @@ class Replica:
         self.commit(highest)
 
     def respond_to_gets(self):
+        """
+        Send a response to the client for all get requests that are confirmed do not have stale data.
+        """
+
         # find the latest time that we've heard from the majority of servers
         latest = sorted(self.last_heard.values())[self.maj_thresh - 1]
 
@@ -464,32 +578,50 @@ class Replica:
 
                 # send a response to the client
                 if get.key in self.state_machine:
-                    dprint(f'completed GET (mid: {get.mid}, key {get.key})')
+                    print(f'completed GET (mid: {get.mid}, key {get.key})', flush=True)
                     self.send_msg(get.src, 'ok', {'MID': get.mid,
                                                   'value': self.state_machine[get.key]})
                 else:
-                    dprint(f'can\'t find value for GET (mid: {get.mid}, key {get.key})')
+                    print(f'can\'t find value for GET (mid: {get.mid}, key {get.key})', flush=True)
                     self.send_msg(get.src, 'ok', {'MID': get.mid,
                                                   'value': ''})
 
-    # returns True if this replica's log is more up to date than the log of another
-    # replica described in a vote request message
     def more_updated(self, msg):
+        """
+        Is this replica's log more up to date than another replica's?
+        Args:
+            msg (dict): a decoded request vote message containing information about the other replica's log
+
+        Returns:
+            bool: Whether this replicas log is more up to date (True) or not (False)
+        """
+
         latest_term = self.log[-1].term if len(self.log) > 0 else -1  # the term of the last entry in our log
         return (latest_term, len(self.log) - 1) > (msg['last_log_term'], msg['last_log_index'])
 
 
-# returns the current time since the epoch in ms
 def now():
+    """
+    Determines the current time.
+
+    Returns:
+        int: the current time since the epoch in milliseconds
+
+    """
     return int(time.time() * 1000)
 
 
-# print a message immediately to stdout
-def dprint(msg):
-    print(str(msg), flush=True)
-
 
 def parse_args():
+    """
+    Parse the command line arguments for the 3700kvstore program.
+    Arguments have the following format:
+    ./3700kvstore <UDP port> <your ID> <ID of second replica> [<ID of third replica> ...]]
+
+    Returns:
+        argparse.Namespace: the parsed arguments
+    """
+
     parser = argparse.ArgumentParser(description='run a key-value store')
     parser.add_argument('port', type=int, help='Port number to communicate')
     parser.add_argument('id', type=str, help='ID of this replica')
