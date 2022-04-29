@@ -8,24 +8,52 @@ import time
 import random
 from enum import Enum
 
-BROADCAST = "FFFF"
-SEED = None
-ELECTION_TIMEOUT_RANGE = range(400, 650)
-HEARTBEAT_FREQUENCY = 175
+BROADCAST = "FFFF"  # the broadcast address
+SEED = None  # the seed to use from random number generation (random seed if None)
+ELECTION_TIMEOUT_RANGE = range(400, 650)  # the range of values an election timeout will be selected from
+HEARTBEAT_FREQUENCY = 175  # the minimum frequency that append RPCs should be sent out from the leader
+# the amount of time a leader should wait before assuming it cannot contact a follower
 RESPONSE_TIMEOUT = int((ELECTION_TIMEOUT_RANGE.start + ELECTION_TIMEOUT_RANGE.stop) / 2 * 1.5)
 
 
 class State(Enum):
+    """
+    Represents one of the three states that a Raft server can be in.
+    """
+
     LEADER = 'leader'
     CANDIDATE = 'candidate'
     FOLLOWER = 'follower'
 
     def __str__(self):
+        """
+        Produces a string representing this state for debugging.
+
+        Returns:
+            str: the string representing this state
+        """
+
         return self.value
 
 
 class Entry:
+    """
+    Represents a put request from a client stored in a Raft server's log.
+    """
+
     def __init__(self, term, key, value, src, dst, mid):
+        """
+        Constructs a new Entry.
+
+        Args:
+            term (int): the term that this entry was added in
+            key (str): the key for the state machine
+            value (str): the value for the state machine
+            src (str): the address of the client sent the request associated with this entry
+            dst (str): the address of the leader whom the request associated with this entry was originally sent to
+            mid (str): the message ID of the request associated with this entry
+        """
+
         self.term = term
         self.key = key
         self.value = value
@@ -34,6 +62,13 @@ class Entry:
         self.mid = mid
 
     def encode(self):
+        """
+        Encodes this entry as a dictionary in order to be sent to another replica.
+
+        Returns:
+            dict: the dictionary representing this entry.
+        """
+
         return {'term': self.term,
                 'key': self.key,
                 'value': self.value,
@@ -43,6 +78,16 @@ class Entry:
 
     @classmethod
     def decode(cls, dct):
+        """
+        Constructs a new Entry from a dictionary sent by another replica.
+
+        Args:
+            dct (dict): the dictionary containing the data of the entry sent by the other replica
+
+        Returns:
+            Entry: the entry constructed from the given dictionary
+        """
+
         return Entry(dct['term'], dct['key'], dct['value'], dct['src'], dct['dst'], dct['mid'])
 
     def __str__(self):
@@ -50,21 +95,64 @@ class Entry:
 
 
 class Get:
+    """
+    Represents a get request from a client.
+    """
+
     def __init__(self, src, key, mid):
+        """
+        Constructs a new Get.
+
+        Args:
+            src (str): the address of the client that made this get request
+            key (str): the key corresponding to the value to get from the state machine
+            mid (str): the message ID of the get request
+        """
+
         self.src = src
         self.key = key
         self.mid = mid
         self.time = now()
 
     def __hash__(self):
+        """
+        Hashes this get based on the message id.
+
+        Returns:
+            int: the hash of this Get
+        """
+
         return hash(self.mid)
 
     def __eq__(self, other):
+        """
+        Is this Get's message ID equal to another Get's message ID?
+
+        Args:
+            other: the other Get to compare to this one
+
+        Returns:
+            bool: whether the Gets are equal (True) or not (False)
+        """
+
         return self.mid == other.mid
 
 
 class Replica:
+    """
+    Represents this one Raft server.
+    """
+
     def __init__(self, port, id, others):
+        """
+        Constructs a new Replica.
+
+        Args:
+            port (int): the port number to send and receive messages from
+            id (int): the ID assigned to this replica
+            others (list of str): the IDs of the other replicas in this cluster
+        """
+
         # initialize connection data
         self.port = port
         self.id = id
@@ -74,28 +162,30 @@ class Replica:
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.socket.bind(('localhost', 0))
 
-        # initialize Raft data
-        self.state = State.FOLLOWER
-        self.log = []
-        self.state_machine = {}
-        self.current_term = -1
-        self.leader = BROADCAST
+        # initialize replica data
+        self.state = State.FOLLOWER  # the current state of this replica
+        self.log = []  # a list of entries that have or will be added to the state machine
+        self.state_machine = {}  # the state machine storing log entries that have been committed
+        self.current_term = -1  # the term of this replica
+        self.leader = BROADCAST  # the ID of the replica that this replica current believes is the leader
+        # how long to wait before staring  an election (in milliseconds)
         self.election_timeout = random.choice(ELECTION_TIMEOUT_RANGE)
-        self.last_append_time = now()
-        self.voted_for = None
-        self.votes = set()
-        self.commit_index = -1
-        self.gets = set()
+        self.app_recv_time = now()  # the last time an append RPC was received
+        self.voted_for = None  # the server this replica has voted for during the current term
+        self.votes = set()  # the set of replicas that have voted for this replica during the current term
+        self.commit_index = -1  # the index of the highest entry that has been committed
+        self.gets = set()  # get requests from the client that have not been responded to
+        self.maj_thresh = int((len(self.others) + 1) / 2) + 1  # the number of replicas required for a quorum
 
         # initialize leader data
-        # map from id to the index of the highest log entry known to be on the server
+        # map from IDs to the last time an append RCP was sent to the corresponding server
+        self.app_send_times = dict.fromkeys(self.others, now())
+        # map from IDs to the index of the highest log entry known to be on the corresponding server
         self.match_index = dict.fromkeys(self.others, -1)
-        # map from id to next index the leader will send to that server
+        # map from IDs to next index the leader will send to the corresponding server
         self.next_index = dict.fromkeys(self.others, len(self.log))
-        # map from id to the last time we've heard from that server
+        # map from IDs to the last time we've heard from the corresponding server
         self.last_heard = dict.fromkeys(self.others, 0)
-
-        self.maj_thresh = int((len(self.others) + 1) / 2) + 1
 
         # start a new term
         self.new_term(0)
@@ -105,7 +195,11 @@ class Replica:
         self.send_msg(BROADCAST, 'hello', {})
 
     def run(self):
-        timeout = self.election_timeout - (now() - self.last_append_time)
+        """
+        Runs this replica, receiving and responding to messages from clients and other servers.
+        """
+
+        timeout = self.election_timeout - (now() - self.app_recv_time)
 
         while True:
             socks = select.select([self.socket], [], [], float(max(0, timeout)) / 1000)[0]
@@ -117,7 +211,7 @@ class Replica:
 
             # check for timeouts
             if self.state == State.LEADER:
-                if now() >= self.last_append_time + HEARTBEAT_FREQUENCY:
+                if now() >= min(self.app_send_times.values()) + HEARTBEAT_FREQUENCY:
                     # heartbeat timeout (we haven't sent append RPCs in a while)
                     self.send_heartbeat()
                 latest = sorted(self.last_heard.values())[self.maj_thresh - 1]
@@ -125,12 +219,12 @@ class Replica:
                     # leader timeout (we haven't heard form a majority of replicas in a while)
                     self.state = State.FOLLOWER
                     self.leader = BROADCAST
-                timeout = min(HEARTBEAT_FREQUENCY - (now() - self.last_append_time),
+                timeout = min(HEARTBEAT_FREQUENCY - (now() - self.app_recv_time),
                               RESPONSE_TIMEOUT - (now() - latest))
-            elif now() >= self.last_append_time + self.election_timeout:
+            elif now() >= self.app_recv_time + self.election_timeout:
                 # election timeout (we haven't heard from the leader in a while)
                 self.begin_election()
-                timeout = self.election_timeout - (now() - self.last_append_time)
+                timeout = self.election_timeout - (now() - self.app_recv_time)
 
     def send_msg(self, dst, type, keys):
         msg = {'src': self.id,
@@ -156,7 +250,7 @@ class Replica:
     def begin_election(self):
         self.new_term(self.current_term + 1)
         dprint(f'starting election (term: {self.current_term})')
-        self.last_append_time = now()
+        self.app_recv_time = now()
         self.state = State.CANDIDATE
         self.voted_for = self.id
         self.votes = {self.id}  # vote for yourself
@@ -179,7 +273,7 @@ class Replica:
         # apply commands to state machine
         for entry in self.log[self.commit_index + 1:index + 1]:
             self.state_machine[entry.key] = entry.value
-            
+
             # send response to client
             if self.state == State.LEADER:
                 self.send_msg(entry.src, 'ok', {'MID': entry.mid})
@@ -222,14 +316,15 @@ class Replica:
     def handle_put(self, msg):
         if self.state == State.LEADER:
             # execute the request as the leader
-            if len(list(filter(lambda e: e.mid == msg['mid'], self.log))) > 0:
+            if len(list(filter(lambda e: e.mid == msg['MID'], self.log))) > 0:
                 # this is a duplicate request, respond immediately
-                self.send_msg(msg['src'], 'ok', {'MID': msg['mid']})
+                self.send_msg(msg['src'], 'ok', {'MID': msg['MID']})
             else:
                 # this is a new request, add an entry to our log
-                dprint(f'executing PUT (mid: {msg["MID"]}, key {msg["key"]}, value: {msg["value"]}, index: {len(self.log)})')
+                dprint(f'executing PUT (mid: {msg["MID"]}, key {msg["key"]}, '
+                       f'value: {msg["value"]}, index: {len(self.log)})')
                 self.log.append(Entry(self.current_term, msg['key'], msg['value'], msg['src'], msg['dst'], msg['MID']))
-                
+
                 # replicate message on other servers
                 for dst in self.others:
                     self.send_update(dst)
@@ -241,14 +336,14 @@ class Replica:
     def handle_request_vote(self, msg):
         # update our current term if we are behind
         self.new_term(msg['term'])
-        
+
         # ensure this request is valid
         if self.current_term <= msg['term'] and self.voted_for is None and not self.more_updated(msg):
             # vote for the sender
             dprint(f'voting for {msg["src"]}')
             self.state = State.FOLLOWER
             self.leader = BROADCAST
-            self.last_append_time = now()
+            self.app_recv_time = now()
             self.voted_for = msg['src']
             self.send_msg(msg['src'], 'request_vote_response', {'term': self.current_term})
 
@@ -261,7 +356,7 @@ class Replica:
             # check if we have enough votes to win
             if len(self.votes) >= self.maj_thresh:
                 # we are the leader now
-                dprint(f"I'm the leader now!!! (term={self.current_term})")
+                dprint(f"I'm the leader now (term {self.current_term})")
                 self.state = State.LEADER
                 self.leader = self.id
                 self.match_index = dict.fromkeys(self.others, -1)
@@ -276,7 +371,7 @@ class Replica:
 
         # ensure the Append RPC is valid for the current term
         if msg['term'] >= self.current_term:
-            self.last_append_time = now()
+            self.app_recv_time = now()
             self.state = State.FOLLOWER
             self.leader = msg['src']
             self.new_term(msg['term'])
@@ -315,7 +410,7 @@ class Replica:
         else:
             # replica failed to add entries, try again with entries further back
             self.next_index[msg['src']] -= 1
-            dprint(f'retrying entry replication on {msg["src"]} with index {self.next_index["src"]}')
+            dprint(f'retrying entry replication on {msg["src"]} with index {self.next_index[msg["src"]]}')
             self.send_update(msg['src'])
 
     # send append RPCs to other servers to ensure their log matches this servers log
@@ -337,7 +432,7 @@ class Replica:
             self.send_append(dst, None, None, [])
 
     def send_append(self, dst, prev_index, prev_term, entries):
-        self.last_append_time = now()
+        self.app_send_times[dst] = now()
         self.send_msg(dst, 'append', {'term': self.current_term,
                                       'prev_log_index': prev_index,
                                       'prev_log_term': prev_term,
@@ -370,7 +465,7 @@ class Replica:
                 # send a response to the client
                 if get.key in self.state_machine:
                     dprint(f'completed GET (mid: {get.mid}, key {get.key})')
-                    self.send_msg(get.src, 'ok', {'mid': get.mid,
+                    self.send_msg(get.src, 'ok', {'MID': get.mid,
                                                   'value': self.state_machine[get.key]})
                 else:
                     dprint(f'can\'t find value for GET (mid: {get.mid}, key {get.key})')
@@ -380,7 +475,7 @@ class Replica:
     # returns True if this replica's log is more up to date than the log of another
     # replica described in a vote request message
     def more_updated(self, msg):
-        latest_term = self.log[-1].term if len(self.log) > 0 else -1 # the term of the last entry in our log
+        latest_term = self.log[-1].term if len(self.log) > 0 else -1  # the term of the last entry in our log
         return (latest_term, len(self.log) - 1) > (msg['last_log_term'], msg['last_log_index'])
 
 
