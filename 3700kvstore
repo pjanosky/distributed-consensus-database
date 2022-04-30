@@ -8,12 +8,13 @@ import time
 import random
 from enum import Enum
 
+
 BROADCAST = "FFFF"  # the broadcast address
 SEED = None  # the seed to use from random number generation (random seed if None)
 ELECTION_TIMEOUT_RANGE = range(400, 650)  # the range of values an election timeout will be selected from
 HEARTBEAT_FREQUENCY = 175  # the minimum frequency that append RPCs should be sent out from the leader
-# the amount of time a leader should wait before assuming it cannot contact a follower
-RESPONSE_TIMEOUT = int((ELECTION_TIMEOUT_RANGE.start + ELECTION_TIMEOUT_RANGE.stop) / 2 * 1.5)
+RESPONSE_TIMEOUT = int((ELECTION_TIMEOUT_RANGE.start + ELECTION_TIMEOUT_RANGE.stop) / 2 * 1.5)  # the amount of time
+# a leader should wait before assuming it cannot contact a follower
 
 
 class State(Enum):
@@ -129,7 +130,7 @@ class Get:
         Is this Get's message ID equal to another Get's message ID?
 
         Args:
-            other: the other Get to compare to this one
+            other (Get): the other Get to compare to this one
 
         Returns:
             bool: whether the Gets are equal (True) or not (False)
@@ -379,7 +380,7 @@ class Replica:
             else:
                 # this is a new request, add an entry to our log
                 print(f'executing PUT (mid: {msg["MID"]}, key {msg["key"]}, '
-                       f'value: {msg["value"]}, index: {len(self.log)})', flush=True)
+                      f'value: {msg["value"]}, index: {len(self.log)})', flush=True)
                 self.log.append(Entry(self.current_term, msg['key'], msg['value'], msg['src'], msg['dst'], msg['MID']))
 
                 # replicate message on other servers
@@ -611,12 +612,11 @@ def now():
     return int(time.time() * 1000)
 
 
-
 def parse_args():
     """
     Parse the command line arguments for the 3700kvstore program.
     Arguments have the following format:
-    ./3700kvstore <UDP port> <your ID> <ID of second replica> [<ID of third replica> ...]]
+    ./3700kvstore <UDP port> <your ID> <ID of second replica> [<ID of third replica> ...]
 
     Returns:
         argparse.Namespace: the parsed arguments
@@ -629,7 +629,7 @@ def parse_args():
     return parser.parse_args()
 
 
-# run the kvstore program
+# run the 3700kvstore program
 if __name__ == '__main__':
     if SEED is not None:
         random.seed(SEED)
