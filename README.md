@@ -1,2 +1,14 @@
 # Distributed Key-Value Database
 
+## High-Level Approach
+I tried to follow the implementation guide as closely as possible. I first tried to completely implement the election process before working on replicating entries across replicas. Since the different parts of the raft protocol are so tightly coupled, mostly all of the functionality for the `3700kvstore` program is implemented in the `Replica` class. I have one run loop that continuously responds to timeouts and processes received messages. Each message type has its own helper method.
+
+
+## Challenges
+The biggest challenge for me was understanding all of the intricacies of the Raft protocol. There were a lot of subtleties in the specification that made implementing certain sections difficult. Often, overlooking one detail would cause an issue that took me a while to debug. Another challenge I faced was finding errors in my code. Due to the distributed, asynchronous nature of the `3700kvstore` program, some bugs were very difficult to diagnose. It often took me a long time to figure out what was causing an error, before I could even go about fixing it. The last challenge for me was balancing the different performance metrics for the advanced tests. Some of the thresholds were quite strict. I had to do a lot of trial and error to find the values for certain parameters that would allow all of the performance tests to pass.
+
+## Design Features
+I don't have any particularly notable design features. I tried to follow the Raft specification paper and implementation guide as closely as possible. One difference is that my program doesn't make use of batching. I implemented the ability to batch multiple append RPCs together, but I found that this increased the amount of failed/unanswered responses because important RPCs were less likely to be sent out before a crash/partition. Instead, I found that by adjusting the election timoute range, I was able to decrease the total number of messages while maintaining a high response rate.
+
+## Testing
+Because this program was so tightly integrated with the simulator, it was difficult to do any unit testing. Instead, I mainly resorted to manual trial-and-error testing. I would try to implement all of the features required to pass a certain test configuration before moving on to another one. To help find issues faster, I wrote a script to parse the simulator output, scanning for failed requests, measuring timing, and searching for other errors. This greatly decreased the amount of time it took me to find errors, but the testing and debugging process was still very tedious.
